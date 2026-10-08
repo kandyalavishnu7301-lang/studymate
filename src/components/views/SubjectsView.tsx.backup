@@ -1,0 +1,364 @@
+import React, { useEffect, useState } from 'react';
+import {
+  BookOpen,
+  Plus,
+  Trash2,
+  Edit2,
+  Calendar,
+  Clock,
+  CheckCircle2,
+  FileText,
+  AlertCircle,
+  TrendingUp,
+} from 'lucide-react';
+import { api } from '../../api/client';
+import { Subject, Note, QuizAttempt } from '../../types';
+import { Modal } from '../common/Modal';
+
+export const SubjectsView: React.FC = () => {
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Modal State
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingSubjectId, setEditingSubjectId] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [difficulty, setDifficulty] = useState<'Easy' | 'Medium' | 'Hard'>('Medium');
+  const [examDate, setExamDate] = useState('');
+  const [progress, setProgress] = useState(45);
+  const [topicsInput, setTopicsInput] = useState('');
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [sList, nList, qList] = await Promise.all([
+        api.getSubjects(),
+        api.getNotes(),
+        api.getQuizAttempts(),
+      ]);
+      setSubjects(sList);
+      setNotes(nList);
+      setAttempts(qList);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const handleOpenAdd = () => {
+    setEditingSubjectId(null);
+    setName('');
+    setCode('');
+    setDifficulty('Medium');
+    setExamDate(new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0]);
+    setProgress(30);
+    setTopicsInput('');
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEdit = (s: Subject) => {
+    setEditingSubjectId(s.id);
+    setName(s.name);
+    setCode(s.code);
+    setDifficulty(s.difficulty);
+    setExamDate(s.examDate);
+    setProgress(s.progress);
+    setTopicsInput(s.topics.join(', '));
+    setIsModalOpen(true);
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Are you sure you want to remove this subject?')) return;
+    try {
+      await api.deleteSubject(id);
+      setSubjects((prev) => prev.filter((s) => s.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const parsedTopics = topicsInput
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    try {
+      if (editingSubjectId) {
+        const updated = await api.updateSubject(editingSubjectId, {
+          name,
+          code,
+          difficulty,
+          examDate,
+          progress,
+          topics: parsedTopics,
+        });
+        setSubjects((prev) => prev.map((s) => (s.id === editingSubjectId ? updated : s)));
+      } else {
+        const created = await api.createSubject({
+          name,
+          code,
+          difficulty,
+          color: '#6366f1',
+          examDate,
+          progress,
+          topics: parsedTopics.length > 0 ? parsedTopics : ['Core Fundamentals', 'Advanced Topics'],
+        });
+        setSubjects((prev) => [...prev, created]);
+      }
+      setIsModalOpen(false);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const getDaysLeft = (examDateStr: string) => {
+    const diff = new Date(examDateStr).getTime() - new Date().getTime();
+    const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+    return days > 0 ? days : 0;
+  };
+
+  return (
+    <div className="space-y-6 p-4 sm:p-6 max-w-7xl mx-auto">
+      {/* HEADER */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+            <BookOpen className="h-6 w-6 text-indigo-400" />
+            Syllabus & Course Modules
+          </h2>
+          <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
+            Manage your semester subjects, track syllabus completion, and monitor exam deadlines.
+          </p>
+        </div>
+
+        <button
+          onClick={handleOpenAdd}
+          className="flex items-center space-x-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-indigo-600/30 hover:bg-indigo-500 transition-all cursor-pointer"
+        >
+          <Plus className="h-4 w-4" />
+          <span>Add New Subject</span>
+        </button>
+      </div>
+
+      {/* SUBJECTS CARDS GRID */}
+      {loading ? (
+        <div className="py-12 text-center text-xs text-slate-400">Loading subjects...</div>
+      ) : subjects.length === 0 ? (
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-12 text-center">
+          <p className="text-sm font-semibold text-slate-300">No subjects added yet</p>
+          <p className="text-xs text-slate-500 mt-1">Add your semester subjects to start tracking progress.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {subjects.map((subj) => {
+            const subjectNotes = notes.filter((n) => n.subjectId === subj.id);
+            const daysLeft = getDaysLeft(subj.examDate);
+
+            return (
+              <div
+                key={subj.id}
+                className="relative flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/70 p-5 backdrop-blur-md hover:border-slate-700 transition-all shadow-lg"
+              >
+                <div>
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-indigo-300 border border-slate-700">
+                        {subj.code}
+                      </span>
+                      <h3 className="text-base font-bold text-white mt-1.5">{subj.name}</h3>
+                    </div>
+
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                        subj.difficulty === 'Hard'
+                          ? 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
+                          : subj.difficulty === 'Medium'
+                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20'
+                          : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
+                      }`}
+                    >
+                      {subj.difficulty}
+                    </span>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="space-y-1.5 my-4">
+                    <div className="flex items-center justify-between text-xs text-slate-400">
+                      <span>Syllabus Covered</span>
+                      <span className="font-bold text-indigo-400">{subj.progress}%</span>
+                    </div>
+                    <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400"
+                        style={{ width: `${subj.progress}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Topics List Tags */}
+                  <div className="mb-4">
+                    <p className="text-[11px] font-semibold text-slate-400 mb-1.5">Key Syllabus Topics:</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {subj.topics.map((t, idx) => (
+                        <span
+                          key={idx}
+                          className="text-[10px] px-2 py-0.5 rounded-md bg-slate-950/80 text-slate-300 border border-slate-800/80"
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Quick stats row */}
+                  <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-800/80 text-xs text-slate-400">
+                    <div className="flex items-center space-x-1.5">
+                      <Calendar className="h-3.5 w-3.5 text-amber-400" />
+                      <span>{daysLeft} days to exam</span>
+                    </div>
+                    <div className="flex items-center space-x-1.5">
+                      <FileText className="h-3.5 w-3.5 text-indigo-400" />
+                      <span>{subjectNotes.length} notes saved</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions bottom bar */}
+                <div className="flex items-center justify-end space-x-2 pt-4 mt-4 border-t border-slate-800/60">
+                  <button
+                    onClick={() => handleOpenEdit(subj)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                    title="Edit Subject"
+                  >
+                    <Edit2 className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDelete(subj.id)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                    title="Delete Subject"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ADD / EDIT SUBJECT MODAL */}
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title={editingSubjectId ? 'Edit Subject' : 'Add New Subject'}
+        subtitle="Manage course syllabus, topics, and university exam target date"
+      >
+        <form onSubmit={handleSave} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Subject Name *</label>
+              <input
+                type="text"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Distributed Systems"
+                className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Subject Code *</label>
+              <input
+                type="text"
+                required
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="e.g. CS-402"
+                className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Difficulty</label>
+              <select
+                value={difficulty}
+                onChange={(e) => setDifficulty(e.target.value as any)}
+                className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="Easy">Easy</option>
+                <option value="Medium">Medium</option>
+                <option value="Hard">Hard</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Exam Date</label>
+              <input
+                type="date"
+                required
+                value={examDate}
+                onChange={(e) => setExamDate(e.target.value)}
+                className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+              <span>Syllabus Completion Progress</span>
+              <span className="font-bold text-indigo-400">{progress}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={progress}
+              onChange={(e) => setProgress(Number(e.target.value))}
+              className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">
+              Topics / Modules (comma-separated)
+            </label>
+            <input
+              type="text"
+              value={topicsInput}
+              onChange={(e) => setTopicsInput(e.target.value)}
+              placeholder="e.g. MapReduce, Raft Consensus, CAP Theorem, Vector Clocks"
+              className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex justify-end space-x-2 pt-3">
+            <button
+              type="button"
+              onClick={() => setIsModalOpen(false)}
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-md shadow-indigo-600/30"
+            >
+              {editingSubjectId ? 'Save Subject' : 'Add Subject'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+    </div>
+  );
+};

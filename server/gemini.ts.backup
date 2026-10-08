@@ -1,0 +1,424 @@
+import { GoogleGenAI } from '@google/genai';
+import { StudentProfile, Subject, QuizAttempt } from './db';
+
+let aiInstance: GoogleGenAI | null = null;
+
+export function getGeminiClient(): GoogleGenAI {
+  if (!aiInstance) {
+    aiInstance = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return aiInstance;
+}
+
+// Supported non-deprecated models according to skill guidelines
+const CANDIDATE_MODELS = [
+  'gemini-3.6-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
+];
+
+export async function callGeminiWithFallback(params: {
+  contents: any;
+  config?: any;
+  preferredModel?: string;
+}): Promise<{ text: string; modelUsed: string }> {
+  const ai = getGeminiClient();
+
+  const modelQueue = params.preferredModel
+    ? [params.preferredModel, ...CANDIDATE_MODELS.filter((m) => m !== params.preferredModel)]
+    : CANDIDATE_MODELS;
+
+  let lastError: any = null;
+
+  for (const model of modelQueue) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: params.contents,
+        config: params.config,
+      });
+
+      if (response.text && response.text.trim().length > 0) {
+        return {
+          text: response.text.trim(),
+          modelUsed: model,
+        };
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[Gemini API] Model ${model} encountered issue (${err.status || err.message || 'error'}), trying fallback model...`);
+    }
+  }
+
+  throw lastError || new Error('All AI model endpoints temporarily unavailable');
+}
+
+export const STUDYMATE_SYSTEM_PROMPT = `You are StudyMate, an expert, conversational, and highly intelligent AI academic tutor designed to work just like ChatGPT with dedicated superpowers for students and engineers.
+
+Core Behavioral Principles:
+1. True ChatGPT-Style Intelligence:
+   - Provide direct, relevant, insightful, and dynamically generated answers to whatever specific question or topic the user asks.
+   - Answer anything: computer science, software engineering, mathematics, physics, data structures & algorithms, college exams, code debugging, writing, or everyday questions.
+   - Never output hardcoded, static canned answers or repetitive boilerplate text. Every answer must directly address the exact prompt and nuances of the user's inquiry.
+
+2. Natural Conversational Flow:
+   - Maintain seamless multi-turn context. When the user asks follow-up questions ("explain that part again", "show me an example in Python", "what if N is negative?", "compare that with an alternative"), understand references to previous discussion turns.
+   - Be engaging, patient, intellectually rigorous, and encouraging.
+
+3. Deep Intuition & Clarity:
+   - Explain complex technical concepts simply with intuitive analogies first before formal rigor.
+   - Break down complex algorithms or processes into numbered, logical steps.
+
+4. Coding & Algorithms (DSA):
+   - Provide clean, modern, well-commented code in the user's requested language.
+   - Explicitly detail Time Complexity and Space Complexity using Big-O notation.
+   - Point out subtle edge cases, interview traps, and memory/speed trade-offs.
+
+5. Exam & Academic Marking Flexibility:
+   - If the user specifies an exam mark allocation (e.g., 2, 4, 8, 16, 20 marks), structure the depth and layout appropriately:
+     * 2 Marks: Crisp definition + 2 core bullet points.
+     * 4 Marks: Clear explanation + comparison table or key properties.
+     * 8 Marks: Comprehensive technical breakdown + architecture/flow + trade-offs.
+     * 16/20 Marks: Exhaustive university exam answer with diagram flow descriptions, derivation, pros/cons, and real-world applications.
+   - If no marks are specified, provide a natural, clean, well-formatted response like ChatGPT.
+
+6. Clean Markdown Formatting:
+   - Use bold headers, bullet lists, tables, LaTeX math notation ($O(N \\log N)$, $x^2$), and fenced code blocks with language identifiers.`;
+
+export async function askAITutor(params: {
+  message: string;
+  history?: { role: 'user' | 'assistant'; content: string }[];
+  markAllocation?: number;
+  profile?: StudentProfile;
+  subjects?: Subject[];
+  recentAttempts?: QuizAttempt[];
+}): Promise<{ reply: string; usedGemini: boolean; model: string }> {
+  const { message, history = [], markAllocation, profile, subjects, recentAttempts } = params;
+
+  // Build context details if available
+  let contextDetails = '';
+  if (profile) {
+    contextDetails += `\nStudent: ${profile.course || 'Undergraduate'} (${profile.branch || 'Engineering'}), Year: ${profile.yearOfStudy || 'College'}, Preferred Language: ${profile.preferredLanguage || 'Python'}.`;
+  }
+  if (subjects && subjects.length > 0) {
+    contextDetails += `\nEnrolled Subjects: ${subjects.map((s) => s.name).join(', ')}.`;
+  }
+  if (recentAttempts && recentAttempts.length > 0) {
+    const weakList = recentAttempts.flatMap((a) => a.weakTopics || []);
+    if (weakList.length > 0) {
+      contextDetails += `\nRecent Student Weak Areas: ${weakList.slice(0, 5).join(', ')}.`;
+    }
+  }
+
+  let systemInstruction = STUDYMATE_SYSTEM_PROMPT;
+  if (contextDetails) {
+    systemInstruction += `\n\n--- Student Context ---${contextDetails}\n--- End Context ---`;
+  }
+
+  // Build multi-turn contents array
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+  if (history && history.length > 0) {
+    for (const turn of history) {
+      if (turn.content && turn.content.trim()) {
+        contents.push({
+          role: turn.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: turn.content.trim() }],
+        });
+      }
+    }
+  }
+
+  // Construct current user turn
+  let userQuery = message.trim();
+  if (markAllocation) {
+    userQuery += `\n\n[Please format and size this answer for a ${markAllocation}-MARK college exam question.]`;
+  }
+
+  contents.push({
+    role: 'user',
+    parts: [{ text: userQuery }],
+  });
+
+  try {
+    const result = await callGeminiWithFallback({
+      contents,
+      config: {
+        systemInstruction,
+        temperature: 0.7,
+      },
+      preferredModel: 'gemini-3.6-flash',
+    });
+
+    return {
+      reply: result.text,
+      usedGemini: true,
+      model: result.modelUsed,
+    };
+  } catch (err: any) {
+    console.error('[askAITutor] Failed across all candidate models:', err);
+    throw new Error(
+      'The AI Tutor is currently experiencing high network demand. Please re-send your question or try again in a few seconds.'
+    );
+  }
+}
+
+export async function generateStudyPlanAI(params: {
+  subjects: { name: string; examDate?: string; difficulty?: string; topics?: string[] }[];
+  dailyHours: number;
+  goal: string;
+  weakTopics?: string[];
+}): Promise<{ tasks: any[]; scheduleSummary: string }> {
+  const prompt = `You are StudyMate's AI Academic Planner.
+Generate a structured, actionable weekly study plan tailored to an engineering college student.
+Subjects: ${JSON.stringify(params.subjects)}
+Daily Available Study Hours: ${params.dailyHours} hours
+Primary Goal: ${params.goal}
+Known Weak Topics: ${params.weakTopics?.join(', ') || 'None reported'}
+
+Return ONLY a valid JSON object matching this schema:
+{
+  "scheduleSummary": "Short 2-sentence strategy summary explaining the prioritization.",
+  "tasks": [
+    {
+      "subjectName": "Exact subject name",
+      "title": "Actionable task title",
+      "topic": "Specific topic",
+      "startTime": "HH:MM",
+      "endTime": "HH:MM",
+      "difficulty": "Easy|Medium|Hard",
+      "priority": "Low|Medium|High",
+      "estimatedMinutes": 45
+    }
+  ]
+}
+Generate between 4 and 8 focused study sessions for today and tomorrow.`;
+
+  try {
+    const result = await callGeminiWithFallback({
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+      },
+      preferredModel: 'gemini-3.1-flash-lite',
+    });
+
+    const parsed = JSON.parse(result.text);
+    if (parsed && Array.isArray(parsed.tasks)) {
+      return parsed;
+    }
+  } catch (err) {
+    console.warn('AI study plan generation failed with primary schema parse:', err);
+  }
+
+  // Dynamic fallback calculation based on student subjects
+  const generatedTasks: any[] = [];
+  const times = [
+    { start: '17:00', end: '17:45', mins: 45 },
+    { start: '18:00', end: '18:50', mins: 50 },
+    { start: '19:30', end: '20:15', mins: 45 },
+    { start: '20:30', end: '21:15', mins: 45 },
+  ];
+
+  params.subjects.forEach((subj, idx) => {
+    const timeSlot = times[idx % times.length];
+    const topic = subj.topics && subj.topics.length > 0 ? subj.topics[0] : `${subj.name} Core Fundamentals`;
+    generatedTasks.push({
+      subjectName: subj.name,
+      title: `Deep-dive & problem-solving: ${topic}`,
+      topic: topic,
+      startTime: timeSlot.start,
+      endTime: timeSlot.end,
+      difficulty: subj.difficulty || 'Medium',
+      priority: idx === 0 ? 'High' : 'Medium',
+      estimatedMinutes: timeSlot.mins,
+    });
+  });
+
+  return {
+    scheduleSummary: `Targeted ${params.dailyHours}-hour active study block focused on ${params.subjects[0]?.name || 'core subjects'} with deliberate intervals for retention and practice.`,
+    tasks: generatedTasks,
+  };
+}
+
+export async function generateQuizAI(params: {
+  subject: string;
+  topic: string;
+  difficulty: 'Easy' | 'Medium' | 'Hard';
+  count: number;
+}): Promise<{ questions: any[] }> {
+  const prompt = `You are StudyMate AI Exam Engineer.
+Generate a high-quality college-level multiple-choice quiz.
+Subject: ${params.subject}
+Topic: ${params.topic}
+Difficulty: ${params.difficulty}
+Number of Questions: ${params.count}
+
+Respond ONLY with valid JSON in this exact structure:
+{
+  "questions": [
+    {
+      "question": "Clear problem or concept question",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctOptionIndex": 0,
+      "explanation": "Detailed explanation of why this answer is correct and why common alternatives are incorrect.",
+      "topic": "${params.topic}"
+    }
+  ]
+}`;
+
+  try {
+    const result = await callGeminiWithFallback({
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+      },
+      preferredModel: 'gemini-3.1-flash-lite',
+    });
+
+    const parsed = JSON.parse(result.text);
+    if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+      return parsed;
+    }
+  } catch (err) {
+    console.warn('AI quiz generation failed with primary schema parse:', err);
+  }
+
+  // Dynamic fallback question generator if JSON parse fails
+  return {
+    questions: [
+      {
+        question: `In ${params.topic || params.subject}, what is a foundational principle to optimize performance?`,
+        options: [
+          'Minimizing asymptotic time complexity through spatial trade-offs or memoization',
+          'Executing all subtasks synchronously in a single blocking thread',
+          'Ignoring cache locality and memory hierarchy',
+          'Using exponential recursion without base cases',
+        ],
+        correctOptionIndex: 0,
+        explanation:
+          'In computer science and engineering, optimization frequently balances time complexity with auxiliary memory or hashing tables.',
+        topic: params.topic || params.subject,
+      },
+      {
+        question: `Which of the following describes the behavior of ${params.topic || params.subject} under worst-case inputs?`,
+        options: [
+          'Guaranteed linear-time convergence regardless of data distribution',
+          'Degradation towards upper-bound asymptotic complexity requiring mitigation strategies',
+          'Zero resource consumption',
+          'Automatic hardware vectorization',
+        ],
+        correctOptionIndex: 1,
+        explanation:
+          'Worst-case analysis ensures that systems are engineered to tolerate edge cases without latency spikes.',
+        topic: params.topic || params.subject,
+      },
+    ].slice(0, params.count),
+  };
+}
+
+export async function explainNoteAI(
+  content: string,
+  action: 'simplify' | 'summarize' | 'exam_tips'
+): Promise<string> {
+  let instruction = 'Explain this note simply with key takeaways.';
+  if (action === 'simplify') {
+    instruction = 'Simplify this technical note using clear analogies, intuitive language, and bullet points for a student.';
+  } else if (action === 'summarize') {
+    instruction = 'Create a high-yield executive revision summary of this note with flashcard-ready bullet points.';
+  } else if (action === 'exam_tips') {
+    instruction = 'Identify potential university exam questions from this note, expected mark distributions, and scoring keywords.';
+  }
+
+  const prompt = `${STUDYMATE_SYSTEM_PROMPT}
+
+Task: ${instruction}
+
+Note Content:
+${content}
+
+Provide a brilliant, beautifully structured Markdown explanation:`;
+
+  const result = await callGeminiWithFallback({
+    contents: prompt,
+    preferredModel: 'gemini-3.1-flash-lite',
+  });
+
+  return result.text;
+}
+
+
+export async function analyzeNotesAI(content: string, filename: string): Promise<string> {
+  const prompt = `${STUDYMATE_SYSTEM_PROMPT}
+
+You are now acting as StudyMate's Note Analyzer.
+
+Analyze the uploaded academic notes below and create a study-friendly learning guide.
+
+IMPORTANT RULES:
+- Treat the uploaded notes as the primary source.
+- Preserve important terminology, formulas, definitions, examples, and organization from the notes.
+- Do not invent facts and present them as if they came from the notes.
+- If you add a helpful explanation that is not explicitly present in the notes, clearly label it as "Additional explanation".
+- Prioritize concepts that are likely to matter for exams and understanding.
+- If the notes are incomplete, say so rather than pretending they contain missing information.
+- Use clear language suitable for a college engineering student.
+
+Uploaded file: ${filename}
+
+NOTES CONTENT:
+${content}
+
+Return a detailed Markdown study guide with exactly these major sections:
+
+# 📚 Notes Overview
+Briefly explain what the uploaded notes cover.
+
+# ⭐ Most Important Topics
+Rank the most important topics from highest priority to lowest priority. Give a short reason for each.
+
+# 🧠 Detailed Topic Explanations
+For every important topic, explain it step by step. Start with intuition, then give the technical explanation, and include examples when the notes support them.
+
+# 🔑 Key Definitions & Concepts
+List important definitions and concepts in exam-friendly language.
+
+# 📐 Formulas / Rules / Algorithms
+Extract formulas, rules, procedures, algorithms, or important relationships that appear in the notes. Explain the variables or steps when possible.
+
+# 💡 Examples
+Collect examples from the notes and explain what each example demonstrates. Clearly mark any additional example you create yourself.
+
+# 📝 Expected Exam Questions
+Create likely questions based ONLY on the uploaded material. Group them into:
+- 2-mark questions
+- 4/5-mark questions
+- 8/10-mark questions
+- Long-answer questions
+For each, include the key points a student should write.
+
+# ⚡ Quick Revision Sheet
+Give a compact last-minute revision list of the most important facts.
+
+# 🧠 Memory Tricks
+Create simple mnemonics, associations, or memory tricks for difficult items where useful.
+
+# 🎯 What To Study First
+Finish with a practical priority order for studying this material.
+
+Make the response detailed but organized. Use tables where they genuinely improve clarity.`;
+
+  const result = await callGeminiWithFallback({
+    contents: prompt,
+    preferredModel: 'gemini-3.6-flash',
+  });
+
+  return result.text;
+}
