@@ -35,7 +35,7 @@ const googleClient = new OAuth2Client(
 );
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
@@ -1961,8 +1961,8 @@ async function start() {
     });
   }
 
-  app.listen(PORT, '127.0.0.1', () => {
-    console.log(`StudyMate server listening on http://localhost:${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`StudyMate server listening on port ${PORT}`);
   });
 }
 
